@@ -17,7 +17,7 @@ on:
           - '使用缓存'
           - '重新编译'
           - '不使用缓存'
-  push:
+  #push:
     branches:
       - master
     paths:
@@ -100,7 +100,7 @@ jobs:
       - name: Configure for ZN504XG-D
         run: |
           ./scripts/kconfig.pl + \
-            configs/an7581.config \
+            configs/my.config \
             configs/release.config > .config
           sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
           printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
