@@ -62,17 +62,6 @@ if [ -d "./feeds/pon_userspace" ] && [ -f "$TOP_DIR/patches/03-pon-userspace-ipt
     ./scripts/feeds install -p pon_userspace -f || true
 fi
 
-# 6. 升级 tailscale 核心至最新稳定版 1.104.7 (安全网状互联)
-TAILSCALE_MK="./feeds/packages/net/tailscale/Makefile"
-if [ -f "$TAILSCALE_MK" ] && ! grep -q "PKG_VERSION:=1.104.7" "$TAILSCALE_MK"; then
-    echo "--> Updating tailscale to 1.104.7..."
-    sed -i -E \
-        -e 's/^PKG_VERSION:=.*$/PKG_VERSION:=1.104.7/' \
-        -e 's/^PKG_HASH:=.*$/PKG_HASH:=fa1c922b33d0f6db6b073800d7a62fa84081323d247b21547c63a98ed7ecac14/' \
-        "$TAILSCALE_MK"
-    rm -f ./tmp/.packageinfo ./tmp/.config-package.in 2>/dev/null || true
-fi
-
 # 7. 规避 Airoha 架构下非必要 feed 循环依赖 (如无用的 squeezelite 音频)
 if [ -L "./package/feeds/packages/squeezelite" ]; then
     rm -f "./package/feeds/packages/squeezelite"
