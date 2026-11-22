@@ -1,53 +1,61 @@
 #!/bin/sh
 
-# 1. 基础网络调优与封包防乱序（禁用 packet_steering 配置与服务以防重载时覆盖 Wi-Fi 四核绑核并确保多核 UDP 保序，显式禁用网桥 igmp_snooping 确保开机原生放行 IPv6 NDP 邻居发现与 IPTV 组播）
-uci -q batch <<EOF
+# 1. 基础网络调优与网桥 IGMP Snooping 启用（避免 IPTV 与 mDNS 组播向 Wi-Fi 空口广播泛洪）
+uci -q batch <<'UCIEOF'
 set network.globals.packet_steering='0'
-set network.@device[0].igmp_snooping='0'
+set network.@device[0].igmp_snooping='1'
 set network.wan.sourcefilter='0'
 commit network
-EOF
+UCIEOF
 if [ -f /etc/init.d/packet_steering ]; then
     /etc/init.d/packet_steering disable 2>/dev/null || true
     /etc/init.d/packet_steering stop 2>/dev/null || true
 fi
 
-# 1.1 默认全开启 Firewall4 硬件流卸载与 FullCone NAT（结合内核补丁 931 彻底修复达发 AN7581 PPE 硬件驱动在 IPv6 PPPoE 下的 L2 subflow 覆写端口、NPU stats 重写死锁与 1518 字节 MTU 越界硬件丢包，实现 IPv4 + IPv6 双栈全速 PPE 硬件流表直转；Web 界面保留用户自主切换选项）
-uci -q batch <<EOF
+# 1.1 默认全开启 Firewall4 硬件流卸载、FullCone NAT 与原生 mtu_fix
+uci -q batch <<'UCIEOF'
 set firewall.@defaults[0].flow_offloading='1'
 set firewall.@defaults[0].flow_offloading_hw='1'
 set firewall.@defaults[0].fullcone='1'
 commit firewall
-EOF
+UCIEOF
 
-# 1.1b 固化 IPv4 (1452) 与 IPv6 (1412) 精细化 MSS 钳制，消除 IPv6 PMTU 黑洞与高并发丢包
-if [ -z "$(uci -q get firewall.mss_clamp)" ]; then
-    uci -q batch <<EOF
-set firewall.mss_clamp=include
-set firewall.mss_clamp.type='nftables'
-set firewall.mss_clamp.path='/etc/nftables.d/99-mss-clamp.nft'
-commit firewall
-EOF
-fi
+# 清理旧版重复的 mss_clamp include 与无效的 proxy (tun0) zone
+uci -q delete firewall.mss_clamp 2>/dev/null || true
+uci -q delete firewall.proxy 2>/dev/null || true
+uci -q delete firewall.lan_proxy 2>/dev/null || true
+uci -q delete firewall.proxy_lan 2>/dev/null || true
+uci -q delete firewall.proxy_wan 2>/dev/null || true
+rm -f /etc/nftables.d/99-mss-clamp.nft 2>/dev/null || true
 
 if ! uci -q get firewall.@zone[1].network | grep -qw 'wan_6'; then
     uci -q add_list firewall.@zone[1].network='wan_6'
-    uci commit firewall
 fi
+uci -q commit firewall
 
-
-# 1.2 预置 LuCI 默认主题为 Vantage 主题（并注册主题列表）
-uci -q batch <<EOF
+# 1.2 预置 LuCI 默认主题为 Vantage 主题并提升 uhttpd 并发处理能力至 16
+uci -q batch <<'UCIEOF'
 set luci.themes.Vantage='/luci-static/vantage'
 set luci.main.mediaurlbase='/luci-static/vantage'
 commit luci
-EOF
+set uhttpd.main.max_requests='16'
+commit uhttpd
+UCIEOF
+chmod -x /usr/libexec/rpcd/luci.airoha_npu.bak 2>/dev/null || true
 
+# 1.2b 无线防误踢与 PMKSA 快速重连缓存预置（解决 Apple 移动设备休眠断连）
+for iface in default_radio0 default_radio1; do
+    if uci -q get "wireless.$iface" >/dev/null 2>&1; then
+        uci -q set "wireless.$iface.disassoc_low_ack=0"
+        uci -q set "wireless.$iface.auth_cache=1"
+        uci -q set "wireless.$iface.ieee80211w=1"
+    fi
+done
+uci -q commit wireless 2>/dev/null || true
 
-
-# 1.3 预置单线复用异 VLAN IPTV 桥接与端口隔离 (pon0.45 IGMP 上行 + pon0.50 组播下行，原生 bridge-port isolate='1' 防止环路反射)
+# 1.3 预置单线复用异 VLAN IPTV 桥接与端口隔离 (pon0.45 IGMP 上行 + pon0.50 组播下行)
 if [ -z "$(uci -q get network.iptv)" ]; then
-    uci -q batch <<EOF
+    uci -q batch <<'UCIEOF'
 set network.pon0_45=bridge-port
 set network.pon0_45.device='pon0.45'
 set network.pon0_45.isolate='1'
@@ -73,11 +81,11 @@ set network.iptv.defaultroute='0'
 set network.iptv.peerdns='0'
 set network.iptv.delegate='0'
 commit network
-EOF
+UCIEOF
 fi
 
 if [ -z "$(uci -q get firewall.iptv)" ]; then
-    uci -q batch <<EOF
+    uci -q batch <<'UCIEOF'
 set firewall.iptv=zone
 set firewall.iptv.name='iptv'
 set firewall.iptv.input='DROP'
@@ -98,15 +106,14 @@ set firewall.allow_iptv_mcast.proto='udp'
 set firewall.allow_iptv_mcast.dest_ip='224.0.0.0/4'
 set firewall.allow_iptv_mcast.target='ACCEPT'
 commit firewall
-EOF
+UCIEOF
 fi
 
-# 2. 预置 rtp2httpd 高性能组播/RTSP/FCC 代理参数 (接管 port 4022，绑定 br-iptv，兼容 /www/iptv.m3u 与 udpxy 路径格式)
-# 注意：使用 instance 结构与纯端口号 '4022' 监听 IPv4/IPv6，确保开机自启并修复 LuCI 状态/播放器按钮跳转
+# 2. 预置 rtp2httpd 高性能组播/RTSP/FCC 代理参数
 if [ -f /etc/config/rtp2httpd ]; then
     uci -q delete rtp2httpd.@rtp2httpd[0]
     uci -q delete rtp2httpd.@instance[0]
-    uci -q batch << 'EOF'
+    uci -q batch <<'UCIEOF'
 set rtp2httpd.main=instance
 set rtp2httpd.main.enabled='1'
 del rtp2httpd.main.listen
@@ -119,7 +126,7 @@ set rtp2httpd.main.buffer_pool_max_size='16384'
 set rtp2httpd.main.udp_rcvbuf_size='524288'
 set rtp2httpd.main.external_m3u='file:///www/iptv.m3u'
 commit rtp2httpd
-EOF
+UCIEOF
 fi
 
 if [ -f /etc/config/msd_lite ]; then
@@ -132,50 +139,26 @@ if [ -f /etc/config/udpxy ]; then
     uci -q commit udpxy
 fi
 
-
-# 3. 预置 Firewall4 对原生透明代理 (tun0) 的放行与转发表（确保直连与内网分流无缝打通）
-if [ -z "$(uci -q get firewall.proxy)" ]; then
-    uci -q batch << 'EOF'
-set firewall.proxy=zone
-set firewall.proxy.name='proxy'
-set firewall.proxy.input='ACCEPT'
-set firewall.proxy.output='ACCEPT'
-set firewall.proxy.forward='ACCEPT'
-add_list firewall.proxy.device='tun0'
-
-set firewall.lan_proxy=forwarding
-set firewall.lan_proxy.src='lan'
-set firewall.lan_proxy.dest='proxy'
-
-set firewall.proxy_lan=forwarding
-set firewall.proxy_lan.src='proxy'
-set firewall.proxy_lan.dest='lan'
-
-set firewall.proxy_wan=forwarding
-set firewall.proxy_wan.src='proxy'
-set firewall.proxy_wan.dest='wan'
-commit firewall
-EOF
+# 3. 抑制 Tailscale stderr 正常路由探针被误判为 err 刷屏
+if [ -f /etc/config/tailscale ]; then
+    uci -q set tailscale.settings.log_stderr='0'
+    uci -q commit tailscale
 fi
 
-# 4. 代理与网络配置目录预置
+# 4. 代理与网络配置目录预置及清理旧 3:1:2 亲和性残留脚本
 mkdir -p /etc/honk
-
-# 确保热插拔与系统调优脚本拥有执行权限
+rm -f /etc/hotplug.d/net/99-wifi-affinity /etc/hotplug.d/net/99-mt7916-cpu-affinity /etc/init.d/mt7916_affinity /etc/rc.d/S99mt7916_affinity /usr/sbin/pin-wifi-cpus.sh 2>/dev/null || true
 chmod +x /etc/hotplug.d/net/50-fw4-bridge-reload 2>/dev/null || true
 chmod +x /etc/hotplug.d/net/99-multicast 2>/dev/null || true
-chmod +x /etc/hotplug.d/net/99-wifi-affinity 2>/dev/null || true
 chmod +x /etc/hotplug.d/iface/90-ipv6-fix 2>/dev/null || true
 chmod +x /etc/hotplug.d/iface/95-iptv-m3u-ip 2>/dev/null || true
-chmod +x /usr/sbin/pin-wifi-cpus.sh 2>/dev/null || true
 
-# 首次启动时自动将 /www/iptv.m3u 中的播放地址同步为当前 LAN IP
 LAN_IP=$(uci -q get network.lan.ipaddr | cut -d/ -f1)
 if [ -n "$LAN_IP" ] && [ -f /www/iptv.m3u ]; then
     sed -i -E "s|http://[0-9.]+(/[0-9]+)?:4022/rtp/|http://${LAN_IP}:4022/rtp/|g" /www/iptv.m3u 2>/dev/null
 fi
 
-# 5. 优化开机 rc.local：高通量 IPTV UDP 核心参数、网卡队列深度与有线网口组播直通
+# 5. 优化开机 rc.local：满频 performance + 以太网核心硬中断分核（解放 CPU0）
 cat << 'RCLOCAL' > /etc/rc.local
 # Put your custom commands here that should be executed once
 # the system init finished. By default this file does nothing.
@@ -190,48 +173,39 @@ fi
 # 2. 重新加载高通量网络缓冲与 IPTV UDP 核心参数
 sysctl -p /etc/sysctl.d/99-custom-net-optimization.conf 2>/dev/null
 
-# 3. 提升核心网桥与网口队列深度为 5000，消除突发高码流丢包
+# 3. 提升核心网桥与有线网口队列深度为 5000，消除突发高码流丢包（不篡改 Wi-Fi AQL/txqueuelen）
 ip link set br-lan txqueuelen 5000 2>/dev/null
-for dev in lan1 lan2 lan3 lan4 eth1 pon0; do
+for dev in lan1 lan2 lan3 lan4 eth1 pon0 pppoe-wan; do
     ip link set "$dev" txqueuelen 5000 2>/dev/null
 done
 
-# 4. 组播侦听与查询优化，保持网桥组播直通（放行 LLDP 0x4000 避免下挂 AP 组播心跳产生 rx_dropped，避免 snooping 拦截 IPv6 NDP 邻居发现与 IPTV 组播）
+# 4. 放行 LLDP 0x4000 避免下挂 AP 组播心跳产生 rx_dropped
 echo 0x4000 > /sys/devices/virtual/net/br-lan/bridge/group_fwd_mask 2>/dev/null
-echo 0 > /sys/devices/virtual/net/br-lan/bridge/multicast_snooping 2>/dev/null
 for eth_port in /sys/devices/virtual/net/br-lan/brif/lan* /sys/devices/virtual/net/br-lan/brif/eth* /sys/devices/virtual/net/br-lan/brif/pon*; do
     [ -d "$eth_port" ] && echo 2 > "$eth_port/multicast_router" 2>/dev/null
 done
 
-# 5. 绑定以太网硬中断与 Wi-Fi 四核收发线程亲和性（IRQ 17->CPU1, IRQ 21->CPU2；mt76-tx->CPU3，napi/phy0-0 打散至 CPU0/1/2）
-echo 1 > /proc/irq/17/smp_affinity_list 2>/dev/null
-echo 2 > /proc/irq/21/smp_affinity_list 2>/dev/null
-[ -x /usr/sbin/pin-wifi-cpus.sh ] && /usr/sbin/pin-wifi-cpus.sh
+# 5. 科学分核以太网核心硬中断（彻底解放 CPU0，保留 NAPI 线程全核自由调度）
+pin_irq() {
+    local irq_num
+    irq_num=$(awk -v name="$1" '$NF == name { gsub(":", "", $1); print $1; exit }' /proc/interrupts)
+    [ -n "$irq_num" ] && [ -w "/proc/irq/$irq_num/smp_affinity_list" ] && echo "$2" > "/proc/irq/$irq_num/smp_affinity_list" 2>/dev/null || true
+}
+pin_irq "airoha_eth.0" 1
+pin_irq "airoha_eth.4" 2
 
-# 6. 精细化 CPUFreq ondemand / conservative 功耗与温控调度
-# ondemand: 75%门限、驻留倍数1立即回落、10%节电偏置激活中间频阶、忽略低优后台负载
-if [ -d /sys/devices/system/cpu/cpufreq/ondemand ]; then
-    echo 75 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold 2>/dev/null
-    echo 1 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_down_factor 2>/dev/null
-    echo 0 > /sys/devices/system/cpu/cpufreq/ondemand/powersave_bias 2>/dev/null
-    echo 1 > /sys/devices/system/cpu/cpufreq/ondemand/ignore_nice_load 2>/dev/null
-    echo 0 > /sys/devices/system/cpu/cpufreq/ondemand/io_is_busy 2>/dev/null
-fi
-# conservative: 10%快速阶跃(消除爬频顿挫)、70%升频门限、30%降频门限、倍数2平滑过渡、忽略低优负载
-if [ -d /sys/devices/system/cpu/cpufreq/conservative ]; then
-    echo 10 > /sys/devices/system/cpu/cpufreq/conservative/freq_step 2>/dev/null
-    echo 70 > /sys/devices/system/cpu/cpufreq/conservative/up_threshold 2>/dev/null
-    echo 30 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold 2>/dev/null
-    echo 2 > /sys/devices/system/cpu/cpufreq/conservative/sampling_down_factor 2>/dev/null
-    echo 1 > /sys/devices/system/cpu/cpufreq/conservative/ignore_nice_load 2>/dev/null
-fi
+# 6. 锁定 CPU performance 满频 (1200 MHz)，消除 ondemand 升频滞后
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -w "$g" ] && echo performance > "$g" 2>/dev/null || true
+done
 
-# 7. 调优 PPE 流表硬件加速触发门限（降至 5 pps，加速常规数据流流表直转，彻底释放 CPU CDM1 队列拥塞）
+# 7. 调优 PPE 流表硬件加速触发门限（降至 5 pps）
 if [ -w /sys/kernel/debug/ppe/bind_rate ]; then
     echo "5 5" > /sys/kernel/debug/ppe/bind_rate 2>/dev/null
 fi
 
 ethtool -K tailscale0 rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
+ethtool -K pppoe-wan gro on 2>/dev/null
 
 # 8. 保护光纤心跳进程 airoha-pond：免疫 OOM Killer (-1000)
 for p in $(pgrep airoha-pond 2>/dev/null); do
@@ -242,17 +216,18 @@ done
 echo 89128960 > /sys/fs/cgroup/services/honk/memory.high 2>/dev/null || true
 [ -d /sys/fs/cgroup/services/honk/honk ] && echo 89128960 > /sys/fs/cgroup/services/honk/honk/memory.high 2>/dev/null || true
 
+tailscale set --accept-routes=false 2>/dev/null || true
+
 exit 0
 RCLOCAL
 
-# 6. ZRAM 内存压缩扩容调优 (zstd 高压缩比算法 + 256MB 稀疏压缩交换区，适配 512MB RAM)
-uci set system.@system[0].zram_size_mb='256'
-uci set system.@system[0].zram_comp_algo='zstd'
-uci commit system
-
-# 7. 每日凌晨 04:30 自动执行 ZRAM 内存空洞压缩整理
-mkdir -p /etc/crontabs
-(crontab -l 2>/dev/null | grep -v 'compact'; echo "30 4 * * * echo 1 > /sys/block/zram0/compact 2>/dev/null") | crontab -
+# 6. 清理虚假 ZRAM 配置与无效 compact 定时任务（无 kmod-zram 下避免内核空转）
+uci -q delete system.@system[0].zram_size_mb 2>/dev/null || true
+uci -q delete system.@system[0].zram_comp_algo 2>/dev/null || true
+uci -q commit system
+if [ -f /etc/crontabs/root ]; then
+    sed -i '/zram0\/compact/d' /etc/crontabs/root 2>/dev/null || true
+fi
 
 # 8. QWRT 经典性能调优：iperf3 测速绑定 Core 3、wget 证书防抖、dnsmasq 降噪
 sed -i '/iperf3=/d' /etc/profile 2>/dev/null
@@ -262,44 +237,37 @@ sed -i '/log-facility/d' /etc/dnsmasq.conf 2>/dev/null
 echo "log-facility=/dev/null" >> /etc/dnsmasq.conf
 
 # 9. 烽火 (FiberHome) PON 认证与代理配置跨版本升级自动保护机制
-# 将关键路径加入 /etc/sysupgrade.conf，防止固件升级抹除认证数据与代理配置
 SYSUPGRADE_CONF="/etc/sysupgrade.conf"
-for path in "/etc/config/pon" "/etc/fiberhome_pon_backup.uci" "/etc/fiberhome_pon_info.txt" "/usr/sbin/backup-fiberhome-pon.sh" "/usr/sbin/restore-fiberhome-pon.sh" "/etc/honk" "/etc/config/honk"; do
+for path in "/etc/config/pon" "/etc/fiberhome_pon_backup.uci" "/etc/fiberhome_pon_info.txt" "/usr/sbin/backup-fiberhome-pon.sh" "/usr/sbin/restore-fiberhome-pon.sh" "/etc/honk" "/etc/config/honk" "/etc/nftables.d/30-sidestore.nft"; do
     if ! grep -q "^$path" "$SYSUPGRADE_CONF" 2>/dev/null; then
         echo "$path" >> "$SYSUPGRADE_CONF"
     fi
 done
 
-# 若存在有效烽火配置，自动生成安全备份；若配置丢失则尝试从备份自动还原
 if [ -x /usr/sbin/backup-fiberhome-pon.sh ] && [ -f /etc/config/pon ]; then
     /usr/sbin/backup-fiberhome-pon.sh 2>/dev/null || true
 elif [ -x /usr/sbin/restore-fiberhome-pon.sh ] && [ ! -s /etc/config/pon ] && [ -f /etc/fiberhome_pon_backup.uci ]; then
     /usr/sbin/restore-fiberhome-pon.sh 2>/dev/null || true
 fi
 
-# 10. CPU 睿频动态调度与轻量化内存释放
-# 默认采用精细化调优的 conservative 调度器（阶跃 10%、门限 70%/30%、低温平滑），空闲 500MHz，重载 1.2GHz
+# 10. CPU 满频 performance (1.2GHz) 调度与轻量化内存释放
 if [ -f /etc/config/cpufreq ]; then
-    uci -q batch <<EOF
+    uci -q batch <<'UCIEOF'
 set cpufreq.cpufreq=settings
-set cpufreq.cpufreq.governor0='ondemand'
+set cpufreq.cpufreq.governor0='performance'
 set cpufreq.cpufreq.minfreq0='500000'
 set cpufreq.cpufreq.maxfreq0='1200000'
-set cpufreq.cpufreq.sdfactor0='2'
-set cpufreq.cpufreq.upthreshold0='75'
 set cpufreq.global=settings
 set cpufreq.global.set='1'
 commit cpufreq
-EOF
+UCIEOF
 fi
 
-# 默认关闭纯光猫网关未使用的 Samba4 与 wsdd2 文件共享，开机净省 ~40MB 物理内存
 /etc/init.d/samba4 disable 2>/dev/null || true
 /etc/init.d/wsdd2 disable 2>/dev/null || true
 
-# 11. QWRT 精华调优移植：SSDP/WSD 组播免连接跟踪 (NOTRACK) 与 16MB 万兆 TCP 套接字大缓冲区
-# 避免 UPnP/WSD 局域网广播进入 conntrack 跟踪，杜绝交换芯片 CDM 队列丢包告警
-uci -q batch <<EOF
+# 11. SSDP/WSD 组播免连接跟踪 (NOTRACK) 与 4MB TCP 套接字缓冲区
+uci -q batch <<'UCIEOF'
 set firewall.upnp_ssdp_notrack=rule
 set firewall.upnp_ssdp_notrack.name='UPnP SSDP multicast discovery'
 set firewall.upnp_ssdp_notrack.src='lan'
@@ -327,11 +295,10 @@ set firewall.wsd_ipv6_notrack.dest_ip='ff02::c'
 set firewall.wsd_ipv6_notrack.dest_port='3702'
 set firewall.wsd_ipv6_notrack.target='NOTRACK'
 commit firewall
-EOF
+UCIEOF
 
-# 约束 TCP 读写套接字缓冲区至 4MB 并优化网络队列，消除万兆大带宽长肥管道瓶颈同时防止 423MB 内存溢出
 mkdir -p /etc/sysctl.d
-cat <<'EOF' > /etc/sysctl.d/30-network-buffers.conf
+cat <<'SYSCTLEOF' > /etc/sysctl.d/30-network-buffers.conf
 net.core.rmem_max=4194304
 net.core.wmem_max=4194304
 net.ipv4.tcp_rmem=4096 87380 4194304
@@ -339,26 +306,28 @@ net.ipv4.tcp_wmem=4096 65536 4194304
 net.core.netdev_max_backlog=10000
 net.core.netdev_budget=600
 net.core.dev_weight=128
-EOF
+SYSCTLEOF
 sysctl -p /etc/sysctl.d/30-network-buffers.conf 2>/dev/null || true
 
-# 约束多核 CPU 本地空闲页缓存上限至 1/128，防止内存碎片与多核内存饥饿
-cat <<'EOF' > /etc/sysctl.d/20-airoha-memory.conf
+cat <<'SYSCTLEOF' > /etc/sysctl.d/20-airoha-memory.conf
 vm.percpu_pagelist_high_fraction=128
-EOF
+SYSCTLEOF
 sysctl -p /etc/sysctl.d/20-airoha-memory.conf 2>/dev/null || true
 
-# 12. 预置中国标准时间 (Asia/Shanghai / CST-8) 与完整 NTP 校时
-uci -q batch <<EOF
+# 12. 预置中国标准时间 (Asia/Shanghai)、512KB 日志缓冲与启用本地 NTP Server (配合 ntp_redirect 消除黑洞)
+uci -q batch <<'UCIEOF'
 set system.@system[0].timezone='CST-8'
 set system.@system[0].zonename='Asia/Shanghai'
+set system.@system[0].log_size='512'
+set system.ntp.enable_server='1'
 commit system
-EOF
+UCIEOF
 /etc/init.d/system reload 2>/dev/null || true
+/etc/init.d/sysntpd restart 2>/dev/null || true
 
-# 13. 强制重定向局域网 NTP (UDP 123) 请求至路由器本地 NTP 服务
+# 13. 强制重定向局域网 NTP (UDP 123) 请求至路由器本地已开启监听的 NTP 服务
 if [ -z "$(uci -q get firewall.ntp_redirect)" ]; then
-    uci -q batch << 'EOF'
+    uci -q batch <<'UCIEOF'
 set firewall.ntp_redirect=redirect
 set firewall.ntp_redirect.name='Redirect-NTP'
 set firewall.ntp_redirect.src='lan'
@@ -366,7 +335,7 @@ set firewall.ntp_redirect.proto='udp'
 set firewall.ntp_redirect.src_dport='123'
 set firewall.ntp_redirect.target='DNAT'
 commit firewall
-EOF
+UCIEOF
 fi
 
 exit 0
