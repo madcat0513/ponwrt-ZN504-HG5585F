@@ -164,33 +164,28 @@ jobs:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: PonWrt ZN504XG-D & HG5585F 聚合增强固件 (${{ steps.tag.outputs.release_tag }})
           body: |
-            ## 🌟 相比前一版本（v2026.11.17-2012）的核心更新与变化
+            ## 🌟 相比前一版本（v2026.11.20-0146）的核心更新与变化
 
-            ### 1. 全面引入 Broadcom FullCone 2 支持（全功能 NAT1 / 游戏联机体验跃升）
-            - **内核 6.18、libnftnl、nftables 与 firewall4 全链路打通**：
-              - 在 Linux 6.18 内核、底层数据包库 `libnftnl`、规则管理工具 `nftables` 以及 OpenWrt 核心防火墙 `firewall4` 中，完整集成并适配 Broadcom FullCone 2 架构支持。
-              - **硬件卸载无冲突共存**：针对 `firewall4` 专门增加全功能 FullCone 2 模式，彻底攻克了传统 FullCone NAT 补丁与 Airoha / MediaTek 硬件流卸载（PPE / Hardware Flow Offloading）共存时的规则覆写、丢包与状态不一致缺陷。
-              - **实测收益**：局域网内 PC、PS5、Xbox、Switch 等游戏主机及 P2P / BT 客户端稳定达成 **NAT1 (Full Cone)**，大幅提升 UDP 打洞成功率，显著降低多人联机游戏延迟与对战连接阻断。
+            ### 1. 原生集成 `luci-app-honk` 图形化 Web 管理插件与全中文语言包
+            - **开箱即用 Web 界面**：固件内置完整的 `luci-app-honk` 前端组件，在 LuCI「服务」菜单下直接展示为 **「Honk 透明代理」**；
+            - **图形化控制与在线编辑**：支持在 Web 界面实时查看核心运行状态、启停管理、语法高亮在线编辑与保存 `/etc/honk/config.dae`、实时日志追踪及联动 doona Web 仪表盘；
+            - **全中文本地化支持**：同步集成 `luci-i18n-honk-zh-cn` 中文语言包（`po/zh_Hans/luci-app-honk.po`），彻底告别纯命令行维护。
 
-            ### 2. 固件极致瘦身与动态核心解耦（ROM 释放 64MB sing-box + 30MB honk 核心，按需动态拉取）
-            - **全面剔除固件只读内置的 `sing-box` 与 `honk-core` 静态二进制**：
-              - 固件 ROM 镜像直接瘦身超 **30MB+**（解压缩后等效释放近 **100MB** Flash 空间），彻底根除小存储设备升级空间告急的痛点，杜绝“只读 ROM 占一份、在线升级写 Overlay 又占一份”的闪存双重浪费。
-            - **解耦核心更新与固件更新（零刷机秒级换代）**：
-              - 固件完整固化不可替代的硬核底层运行环境（Linux 6.18 内核 BTF `/sys/kernel/btf/vmlinux`、`kmod-bpf`、`kmod-sched-core`、`kmod-nft-queue`、`kmod-tun` 等核心模块）与 UCI/procd 服务骨架。
-              - 用户态核心转由内置的通用 `honk-install` 助手按需拉取（支持多镜像动态测速回退，刷机后执行 `honk-install` 即可秒级安装官方最新核心）。
-              - `/etc/sysupgrade.conf` 自动将 `/usr/bin/honk-core` 纳入系统备份白名单，后续固件升级自动无感保留，无需重复下载。
-            - **集成最新 Tailscale 1.104.7 稳定版**：
-              - 同步更新 Tailscale 虚拟组网引擎至官方最新的 `1.104.7`，显著提升跨公网打洞成功率与传输吞吐。
+            ### 2. 内置终端双核透明代理交互式管理面板（`sb-honk`）
+            - **终端管理控制台**：内置轻量高效的终端交互式控制台 `/usr/bin/sb-honk`（支持快捷软链 `sb`、`sb-bonk`）；
+            - **一键互斥切换与流卸载联动**：支持 Sing-Box（TUN 裸核模式）与 Honk（eBPF 零开销旁路）一键平滑互斥切换，自动联动防火墙 Flow Offload 与硬件 PPE 加速切换，并接管 Dnsmasq 5353 零泄露上游；
+            - **安全脱敏与模块解耦**：彻底剥离任何私人节点与测试域名，内置安全的配置校验与通用 GitHub 远程订阅拉取机制。
 
-            ### 3. 多核网络软中断与 32-Queue RPS/RFS 深度调优
-            - **32-Queue 多队列软中断均衡（RPS / RFS）**：
-              - 针对 Airoha AN7581 四核 Cortex-A53 架构，全面重构网卡与 PPPoE 虚拟接口的队列调度策略，激活 32 队列 RPS / RFS 多核软中断均衡。
-              - 将大吞吐下行与并发小包均匀打散至 4 个物理核心，彻底根除千兆/2.5G 跑满时软中断积压于单核（Core 0）导致的假死卡顿与丢包。
-            - **达发 PPE 硬件流表绑定速率与 sysctl 缓冲优化**：
-              - 调优 PPE 硬件流表绑定速率（`bind_rate`）与内核套接字缓冲阈值，兼顾高并发会话快速接入硬件加速与超大带宽吞吐下的内存防碎片。
+            ### 3. 修复 Airoha NPU / Frame Engine 仪表盘 Wi-Fi 客户端显示为 0 的 Bug
+            - **信道频段动态识别**：重构 `luci.airoha_npu` 中的频段扫描匹配逻辑，由过去硬编码接口名改为根据信道无线频率动态判别（`<3000MHz` 归类为 2.4G，`<5900MHz` 归类为 5G）；
+            - **统计恢复**：彻底解决上一版本在 `phy0-ap0` / `phy1-ap0` 接口命名下 2.4G / 5G 关联客户端数始终显示为 `0 sta` 的缺陷，精准恢复各频段在线客户端统计与重传率显示。
 
-            ### 4. CI/CD 构建流水线与 Firewall4 补丁闭环修复
-            - **精准适配 OpenWrt 24.10 提交（`e6f600c4`）**：
-              - 修正 `firewall4` 针对 OpenWrt 最新源码提交的代码上下文偏移量与行数计数，彻底清理 CI 流水线中外部冗余覆盖步骤，杜绝了 `firewall.rej` 的编译中断缺陷。
-              - GitHub Actions 每日/触发构建成功率提升至 100%，持续保障 **兆能 ZN504XG-D** 与 **烽火 HG5585F 电信版** 双旗舰固件的高质稳定交付。
+            ### 4. 系统内存防抖与 Web 进程并发优化
+            - **消灭 kswapd0 内存颠簸**：固化 `vm.swappiness=0` 与 `vm.percpu_pagelist_high_fraction=128`，消除无 Swap 分区环境下内核线程在内存高水位时的激进回收与 CPU 占用抖动；
+            - **Web 并发处理能力提升**：`uhttpd` 最大请求并发数由 3 提升至 16，彻底消除 LuCI 多页面并行加载与高频 RPC 轮询时的连接排队与卡顿。
+
+            ### 5. 局域网服务与持久化升级清单完善
+            - **SideStore 局域网回环修复**：内置 `30-sidestore.nft`，修复 iOS 设备（SideStore / AltStore）跨网段局域网证书自签名与握手回环；
+            - **清理冗余网络脚本**：移除陈旧冲突的 4 套 3:1:2 绑核脚本与重复的 MSS 钳制文件，开机由系统内核自主均衡多核心软中断；
+            - **升级白名单固化**：扩展 `/etc/sysupgrade.conf`，将 Honk 核心组件、LuCI 静态资源与关键网络调优脚本纳入系统升级保护白名单，后续固件升级自动无感保留全量配置。
           files: output/*

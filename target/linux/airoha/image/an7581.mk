@@ -186,7 +186,7 @@ define Device/fiberhome_hg5585f-common
   # PON and MT7916D read per-device calibration from factory UBI NVMEM cells.
   DEVICE_PACKAGES := kmod-gpio-button-hotplug kmod-leds-gpio kmod-usb3 \
     kmod-airoha-paged-bosa kmod-airoha-xpon airoha-ponctl airoha-pond \
-	 airoha-en7581-mt7916-npu-firmware kmod-mt7915e kmod-mt7916-firmware wpad-openssl \
+	 kmod-mt7915e kmod-mt7916-firmware wpad-openssl \
 	 fitblk nand-utils ubi-utils $(AIROHA_USB_STORAGE_PACKAGES)
 endef
 
